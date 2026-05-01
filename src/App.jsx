@@ -126,22 +126,55 @@ function App() {
     setCurrentPage('search');
   };
 
-  const updateStock = async (hospitalId, newUnits) => {
-    // Update locally first for instant feedback
-    setHospitals(hospitals.map(h => 
-      h.id === hospitalId ? { ...h, units: newUnits, lastUpdated: 'Just Now' } : h
-    ));
-
-    // If connected, also update Supabase
+  const updateStock = async (hospitalId, bloodGroup, componentTypes, newUnits) => {
+    // If connected, sync to Supabase
     if (dbConnected) {
       try {
-        await supabase
+        // We perform an upsert for each selected component type
+        const updates = componentTypes.map(compType => ({
+          hospital_id: hospitalId,
+          blood_group: bloodGroup,
+          component_type: compType,
+          units_available: newUnits,
+          status: newUnits > 5 ? 'available' : (newUnits > 0 ? 'critical' : 'out_of_stock'),
+          last_updated_at: new Date().toISOString()
+        }));
+
+        const { error } = await supabase
           .from('blood_inventory')
-          .update({ units_available: newUnits, last_updated_at: new Date().toISOString() })
-          .eq('hospital_id', hospitalId);
+          .upsert(updates, { onConflict: 'hospital_id,blood_group,component_type' });
+
+        if (error) throw error;
+        
+        // Re-fetch everything to ensure UI is perfectly in sync with DB calculations
+        const { data } = await supabase
+          .from('hospitals')
+          .select(`*, blood_inventory (*)`);
+        
+        if (data) {
+          const transformed = data.map(h => ({
+            id: h.id,
+            name: h.name,
+            type: h.is_verified ? 'Hospital' : 'Blood Bank',
+            units: h.blood_inventory?.reduce((sum, inv) => sum + (inv.units_available || 0), 0) || 0,
+            distance: `${(Math.random() * 12 + 1).toFixed(1)} km away`,
+            lastUpdated: h.last_updated ? new Date(h.last_updated).toLocaleString() : 'Just Now',
+            components: [...new Set((h.blood_inventory || []).map(inv => inv.component_type).filter(Boolean))],
+            bloodGroups: [...new Set((h.blood_inventory || []).map(inv => inv.blood_group).filter(Boolean))],
+            address: h.address,
+            city: h.city,
+          }));
+          setHospitals(transformed);
+        }
       } catch (err) {
-        console.warn('Could not sync stock update to DB:', err.message);
+        console.error('Database update failed:', err.message);
+        alert("Failed to sync with database: " + err.message);
       }
+    } else {
+      // Fallback local update (simplified)
+      setHospitals(hospitals.map(h => 
+        h.id === hospitalId ? { ...h, units: newUnits, lastUpdated: 'Just Now' } : h
+      ));
     }
   };
 

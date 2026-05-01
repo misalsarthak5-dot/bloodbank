@@ -19,12 +19,13 @@ function AdminPage({ hospitals, onUpdateStock }) {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (!selectedHospitalId || !selectedBloodGroup || units === '') {
-      alert("Please fill in all fields.");
+    if (!selectedHospitalId || !selectedBloodGroup || units === '' || selectedComponents.length === 0) {
+      alert("Please fill in all fields and select at least one component.");
       return;
     }
     
-    onUpdateStock(Number(selectedHospitalId), Number(units));
+    // Pass the full details to the parent
+    onUpdateStock(selectedHospitalId, selectedBloodGroup, selectedComponents, Number(units));
     alert("Stock updated successfully!");
     
     // Reset form
