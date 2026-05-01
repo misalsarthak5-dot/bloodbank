@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { supabase } from './lib/supabase'
 import SearchPage from './pages/SearchPage'
 import ResultsPage from './pages/ResultsPage'
@@ -28,48 +28,71 @@ function App() {
   const [searchQuery, setSearchQuery] = useState({ bloodGroup: '', components: [] });
   const [user, setUser] = useState(null);
   const [dbConnected, setDbConnected] = useState(false);
+  const [bloodRequests, setBloodRequests] = useState([]);
+
+  // Helper to transform Supabase hospital data to frontend format
+  const transformHospitals = (data) => {
+    return data.map(h => ({
+      id: h.id,
+      name: h.name,
+      // Use the facility_type field if present, otherwise fallback
+      type: h.facility_type || (h.name.toLowerCase().includes('hospital') ? 'Hospital' : 'Blood Bank'),
+      units: h.blood_inventory?.reduce((sum, inv) => sum + (inv.units_available || 0), 0) || 0,
+      distance: `${(Math.random() * 12 + 1).toFixed(1)} km away`,
+      lastUpdated: h.last_updated ? new Date(h.last_updated).toLocaleString() : 'Recently',
+      components: [...new Set((h.blood_inventory || []).map(inv => inv.component_type).filter(Boolean))],
+      bloodGroups: [...new Set((h.blood_inventory || []).map(inv => inv.blood_group).filter(Boolean))],
+      address: h.address,
+      city: h.city,
+      // Keep raw inventory for detailed lookups
+      rawInventory: h.blood_inventory || [],
+    }));
+  };
+
+  // Shared refresh function
+  const refreshHospitals = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('hospitals')
+        .select('*, blood_inventory(*)');
+      
+      if (error) {
+        console.warn('Supabase fetch error:', error.message);
+        return;
+      }
+
+      if (data && data.length > 0) {
+        setHospitals(transformHospitals(data));
+        setDbConnected(true);
+      }
+    } catch (err) {
+      console.warn('Could not connect to Supabase:', err.message);
+    }
+  }, []);
+
+  // Fetch blood requests
+  const fetchRequests = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('blood_requests')
+        .select('*, hospitals(name)')
+        .order('created_at', { ascending: false });
+      
+      if (error) {
+        console.warn('Could not fetch requests:', error.message);
+        return;
+      }
+      setBloodRequests(data || []);
+    } catch (err) {
+      console.warn('Request fetch error:', err.message);
+    }
+  }, []);
 
   // Fetch hospitals and inventory from Supabase on mount
   useEffect(() => {
-    const fetchHospitals = async () => {
-      try {
-        const { data, error } = await supabase
-          .from('hospitals')
-          .select('*, blood_inventory(*)');
-        
-        if (error) {
-          console.warn('Supabase fetch error, using local data:', error.message);
-          return;
-        }
-
-        if (data && data.length > 0) {
-          // Transform Supabase data to match our frontend format
-          const transformed = data.map(h => ({
-            id: h.id,
-            name: h.name,
-            type: h.is_verified ? 'Hospital' : 'Blood Bank',
-            units: h.blood_inventory?.reduce((sum, inv) => sum + (inv.units_available || 0), 0) || 0,
-            distance: `${(Math.random() * 12 + 1).toFixed(1)} km away`,
-            lastUpdated: h.last_updated ? new Date(h.last_updated).toLocaleString() : 'Unknown',
-            // components = unique component_type values (Whole Blood, Red Cells, Platelets, Plasma)
-            components: [...new Set((h.blood_inventory || []).map(inv => inv.component_type).filter(Boolean))],
-            // bloodGroups = unique blood group values (A+, B-, etc.)
-            bloodGroups: [...new Set((h.blood_inventory || []).map(inv => inv.blood_group).filter(Boolean))],
-            address: h.address,
-            city: h.city,
-          }));
-          setHospitals(transformed);
-          setDbConnected(true);
-        } else {
-          console.info('No hospitals in DB yet, using fallback data.');
-        }
-      } catch (err) {
-        console.warn('Could not connect to Supabase:', err.message);
-      }
-    };
-
-    fetchHospitals();
-  }, []);
+    refreshHospitals();
+    fetchRequests();
+  }, [refreshHospitals, fetchRequests]);
 
   const navigateTo = (page) => {
     if (page === 'admin' && user?.role !== 'Admin') {
@@ -93,6 +116,8 @@ function App() {
         if (data) {
           setUser({ ...userData, dbId: data.id, name: data.name });
           setCurrentPage('admin');
+          // Refresh requests when admin logs in
+          fetchRequests();
           return;
         }
       } else {
@@ -126,11 +151,107 @@ function App() {
     setCurrentPage('search');
   };
 
+  // Submit a blood request from the user side
+  const submitBloodRequest = async ({ hospitalId, bloodGroup, componentType, unitsNeeded, patientName, contactNumber }) => {
+    if (!dbConnected) {
+      // Local fallback — just deduct units
+      setHospitals(prev => prev.map(h => 
+        h.id === hospitalId ? { ...h, units: Math.max(0, h.units - unitsNeeded), lastUpdated: 'Just Now' } : h
+      ));
+      return { success: true };
+    }
+
+    try {
+      // Step 1: Check available units in inventory
+      const { data: inventoryRows, error: fetchErr } = await supabase
+        .from('blood_inventory')
+        .select('*')
+        .eq('hospital_id', hospitalId)
+        .eq('blood_group', bloodGroup);
+      
+      if (fetchErr) throw fetchErr;
+
+      // Filter by component type if specified
+      let targetRows = inventoryRows || [];
+      if (componentType && componentType !== 'All') {
+        targetRows = targetRows.filter(r => r.component_type === componentType);
+      }
+
+      const totalAvailable = targetRows.reduce((sum, r) => sum + (r.units_available || 0), 0);
+
+      if (totalAvailable < unitsNeeded) {
+        return { success: false, error: `Not enough units available. Only ${totalAvailable} units in stock.` };
+      }
+
+      // Step 2: Insert blood request
+      const { error: insertErr } = await supabase
+        .from('blood_requests')
+        .insert({
+          hospital_id: hospitalId,
+          blood_group: bloodGroup,
+          component_type: componentType || 'Whole Blood',
+          units_needed: unitsNeeded,
+          status: 'pending',
+          notes: `Patient: ${patientName}, Contact: ${contactNumber}`,
+          user_id: user?.dbId || null,
+        });
+      
+      if (insertErr) throw insertErr;
+
+      // Step 3: Decrease inventory — distribute deduction across matching rows
+      let remaining = unitsNeeded;
+      for (const row of targetRows) {
+        if (remaining <= 0) break;
+        const deduct = Math.min(remaining, row.units_available);
+        const newUnits = row.units_available - deduct;
+        
+        await supabase
+          .from('blood_inventory')
+          .update({ 
+            units_available: newUnits,
+            status: newUnits > 5 ? 'available' : (newUnits > 0 ? 'critical' : 'out_of_stock'),
+            last_updated_at: new Date().toISOString()
+          })
+          .eq('id', row.id);
+        
+        remaining -= deduct;
+      }
+
+      // Step 4: Refresh data
+      await refreshHospitals();
+      await fetchRequests();
+
+      return { success: true };
+    } catch (err) {
+      console.error('Request submission failed:', err);
+      return { success: false, error: err.message };
+    }
+  };
+
+  // Admin: update request status
+  const updateRequestStatus = async (requestId, newStatus) => {
+    if (!dbConnected) return;
+    
+    try {
+      const { error } = await supabase
+        .from('blood_requests')
+        .update({ status: newStatus })
+        .eq('id', requestId);
+      
+      if (error) throw error;
+      
+      // Refresh requests list
+      await fetchRequests();
+    } catch (err) {
+      console.error('Status update failed:', err.message);
+      alert('Failed to update status: ' + err.message);
+    }
+  };
+
   const updateStock = async (hospitalId, bloodGroup, componentTypes, newUnits) => {
     // If connected, sync to Supabase
     if (dbConnected) {
       try {
-        // We perform an upsert for each selected component type
         const updates = componentTypes.map(compType => ({
           hospital_id: hospitalId,
           blood_group: bloodGroup,
@@ -146,32 +267,12 @@ function App() {
 
         if (error) throw error;
         
-        // Re-fetch everything to ensure UI is perfectly in sync with DB calculations
-        const { data } = await supabase
-          .from('hospitals')
-          .select(`*, blood_inventory (*)`);
-        
-        if (data) {
-          const transformed = data.map(h => ({
-            id: h.id,
-            name: h.name,
-            type: h.is_verified ? 'Hospital' : 'Blood Bank',
-            units: h.blood_inventory?.reduce((sum, inv) => sum + (inv.units_available || 0), 0) || 0,
-            distance: `${(Math.random() * 12 + 1).toFixed(1)} km away`,
-            lastUpdated: h.last_updated ? new Date(h.last_updated).toLocaleString() : 'Just Now',
-            components: [...new Set((h.blood_inventory || []).map(inv => inv.component_type).filter(Boolean))],
-            bloodGroups: [...new Set((h.blood_inventory || []).map(inv => inv.blood_group).filter(Boolean))],
-            address: h.address,
-            city: h.city,
-          }));
-          setHospitals(transformed);
-        }
+        await refreshHospitals();
       } catch (err) {
         console.error('Database update failed:', err.message);
         alert("Failed to sync with database: " + err.message);
       }
     } else {
-      // Fallback local update (simplified)
       setHospitals(hospitals.map(h => 
         h.id === hospitalId ? { ...h, units: newUnits, lastUpdated: 'Just Now' } : h
       ));
@@ -225,8 +326,23 @@ function App() {
 
       <main className="app-container">
         {currentPage === 'search' && <SearchPage onSearch={handleSearch} />}
-        {currentPage === 'results' && <ResultsPage hospitals={hospitals} searchQuery={searchQuery} onBack={() => navigateTo('search')} />}
-        {currentPage === 'admin' && <AdminPage hospitals={hospitals} onUpdateStock={updateStock} />}
+        {currentPage === 'results' && (
+          <ResultsPage 
+            hospitals={hospitals} 
+            searchQuery={searchQuery} 
+            onBack={() => navigateTo('search')}
+            onSubmitRequest={submitBloodRequest}
+          />
+        )}
+        {currentPage === 'admin' && (
+          <AdminPage 
+            hospitals={hospitals} 
+            onUpdateStock={updateStock}
+            bloodRequests={bloodRequests}
+            onUpdateRequestStatus={updateRequestStatus}
+            onRefreshRequests={fetchRequests}
+          />
+        )}
       </main>
     </>
   )

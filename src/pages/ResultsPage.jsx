@@ -1,16 +1,19 @@
 import { useState } from 'react';
 import './ResultsPage.css';
 
-function ResultsPage({ hospitals, searchQuery, onBack }) {
+function ResultsPage({ hospitals, searchQuery, onBack, onSubmitRequest }) {
   const { bloodGroup, components } = searchQuery;
   const [selectedHospital, setSelectedHospital] = useState(null);
   const [showModal, setShowModal] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
+  const [requestError, setRequestError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Form state
   const [patientName, setPatientName] = useState('');
   const [contactNumber, setContactNumber] = useState('');
   const [requiredUnits, setRequiredUnits] = useState(1);
+  const [selectedComponent, setSelectedComponent] = useState('');
   const [paymentOption, setPaymentOption] = useState('hospital');
 
   const filteredHospitals = hospitals.filter(hospital => {
@@ -31,14 +34,52 @@ function ResultsPage({ hospitals, searchQuery, onBack }) {
     setPatientName('');
     setContactNumber('');
     setRequiredUnits(1);
+    setSelectedComponent(components?.length > 0 ? components[0] : 'Whole Blood');
     setPaymentOption('hospital');
+    setRequestError('');
     setShowModal(true);
   };
 
-  const handleSubmitRequest = (e) => {
+  const handleSubmitRequest = async (e) => {
     e.preventDefault();
-    setShowModal(false);
-    setShowSuccess(true);
+    setRequestError('');
+    setIsSubmitting(true);
+
+    try {
+      // Validate units
+      if (requiredUnits < 1) {
+        setRequestError('Please request at least 1 unit.');
+        setIsSubmitting(false);
+        return;
+      }
+
+      if (requiredUnits > selectedHospital.units) {
+        setRequestError(`Not enough units available. Only ${selectedHospital.units} units in stock.`);
+        setIsSubmitting(false);
+        return;
+      }
+
+      // Submit to backend
+      const result = await onSubmitRequest({
+        hospitalId: selectedHospital.id,
+        bloodGroup: bloodGroup || 'O+',
+        componentType: selectedComponent || 'Whole Blood',
+        unitsNeeded: requiredUnits,
+        patientName,
+        contactNumber,
+      });
+
+      if (result.success) {
+        setShowModal(false);
+        setShowSuccess(true);
+      } else {
+        setRequestError(result.error || 'Failed to submit request. Please try again.');
+      }
+    } catch (err) {
+      setRequestError('An unexpected error occurred. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -143,7 +184,18 @@ function ResultsPage({ hospitals, searchQuery, onBack }) {
                 </div>
                 <div className="form-group">
                   <label className="form-label">Component</label>
-                  <input type="text" className="form-input disabled-input" value={components?.join(', ') || 'Whole Blood'} disabled />
+                  <select 
+                    className="form-select" 
+                    value={selectedComponent}
+                    onChange={(e) => setSelectedComponent(e.target.value)}
+                  >
+                    {(selectedHospital.components && selectedHospital.components.length > 0 
+                      ? selectedHospital.components 
+                      : ['Whole Blood']
+                    ).map(comp => (
+                      <option key={comp} value={comp}>{comp}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
@@ -185,6 +237,18 @@ function ResultsPage({ hospitals, searchQuery, onBack }) {
                 </div>
               </div>
 
+              {/* Error Display */}
+              {requestError && (
+                <div className="request-error">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="15" y1="9" x2="9" y2="15"></line>
+                    <line x1="9" y1="9" x2="15" y2="15"></line>
+                  </svg>
+                  {requestError}
+                </div>
+              )}
+
               <div className="service-charges-banner">
                 <h4 style={{ marginBottom: '0.25rem', fontSize: '0.9rem', color: 'var(--text-dark)' }}>Service Charges</h4>
                 <p style={{ fontSize: '0.8rem', color: 'var(--text-light)', marginBottom: '0.75rem' }}>Charges may apply for processing, testing, and handling.</p>
@@ -202,7 +266,13 @@ function ResultsPage({ hospitals, searchQuery, onBack }) {
 
               <div className="modal-footer">
                 <button type="button" className="btn btn-secondary" onClick={() => setShowModal(false)} style={{ background: 'transparent', color: 'var(--text-light)', border: '1px solid var(--border-color)' }}>Cancel</button>
-                <button type="submit" className="btn btn-primary confirm-btn">Confirm Request</button>
+                <button 
+                  type="submit" 
+                  className="btn btn-primary confirm-btn" 
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? 'Submitting...' : 'Confirm Request'}
+                </button>
               </div>
             </form>
           </div>
