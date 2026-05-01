@@ -35,7 +35,6 @@ function App() {
     return data.map(h => ({
       id: h.id,
       name: h.name,
-      // Use the facility_type field if present, otherwise fallback
       type: h.facility_type || (h.name.toLowerCase().includes('hospital') ? 'Hospital' : 'Blood Bank'),
       units: h.blood_inventory?.reduce((sum, inv) => sum + (inv.units_available || 0), 0) || 0,
       distance: `${(Math.random() * 12 + 1).toFixed(1)} km away`,
@@ -44,12 +43,10 @@ function App() {
       bloodGroups: [...new Set((h.blood_inventory || []).map(inv => inv.blood_group).filter(Boolean))],
       address: h.address,
       city: h.city,
-      // Keep raw inventory for detailed lookups
       rawInventory: h.blood_inventory || [],
     }));
   };
 
-  // Shared refresh function
   const refreshHospitals = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -70,7 +67,6 @@ function App() {
     }
   }, []);
 
-  // Fetch blood requests
   const fetchRequests = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -88,7 +84,6 @@ function App() {
     }
   }, []);
 
-  // Fetch hospitals and inventory from Supabase on mount
   useEffect(() => {
     refreshHospitals();
     fetchRequests();
@@ -104,7 +99,6 @@ function App() {
   };
 
   const handleLogin = async (userData) => {
-    // Try to authenticate against Supabase users/admins tables
     try {
       if (userData.role === 'Admin') {
         const { data } = await supabase
@@ -116,7 +110,6 @@ function App() {
         if (data) {
           setUser({ ...userData, dbId: data.id, name: data.name });
           setCurrentPage('admin');
-          // Refresh requests when admin logs in
           fetchRequests();
           return;
         }
@@ -137,7 +130,6 @@ function App() {
       console.warn('DB auth lookup failed, using local auth:', err.message);
     }
 
-    // Fallback to local hardcoded auth
     setUser(userData);
     if (userData.role === 'Admin') {
       setCurrentPage('admin');
@@ -151,39 +143,27 @@ function App() {
     setCurrentPage('search');
   };
 
-  // Submit a blood request from the user side
+  // 1. Submit Request (Just inserts record now, doesn't deduct yet)
   const submitBloodRequest = async ({ hospitalId, bloodGroup, componentType, unitsNeeded, patientName, contactNumber }) => {
     if (!dbConnected) {
-      // Local fallback — just deduct units
-      setHospitals(prev => prev.map(h => 
-        h.id === hospitalId ? { ...h, units: Math.max(0, h.units - unitsNeeded), lastUpdated: 'Just Now' } : h
-      ));
       return { success: true };
     }
 
     try {
-      // Step 1: Check available units in inventory
-      const { data: inventoryRows, error: fetchErr } = await supabase
+      // Validation Check
+      const { data: inventoryRows } = await supabase
         .from('blood_inventory')
-        .select('*')
+        .select('units_available')
         .eq('hospital_id', hospitalId)
-        .eq('blood_group', bloodGroup);
+        .eq('blood_group', bloodGroup)
+        .eq('component_type', componentType || 'Whole Blood');
       
-      if (fetchErr) throw fetchErr;
-
-      // Filter by component type if specified
-      let targetRows = inventoryRows || [];
-      if (componentType && componentType !== 'All') {
-        targetRows = targetRows.filter(r => r.component_type === componentType);
-      }
-
-      const totalAvailable = targetRows.reduce((sum, r) => sum + (r.units_available || 0), 0);
+      const totalAvailable = inventoryRows?.reduce((sum, r) => sum + (r.units_available || 0), 0) || 0;
 
       if (totalAvailable < unitsNeeded) {
-        return { success: false, error: `Not enough units available. Only ${totalAvailable} units in stock.` };
+        return { success: false, error: `Not enough units available. Only ${totalAvailable} in stock.` };
       }
 
-      // Step 2: Insert blood request
       const { error: insertErr } = await supabase
         .from('blood_requests')
         .insert({
@@ -198,29 +178,7 @@ function App() {
       
       if (insertErr) throw insertErr;
 
-      // Step 3: Decrease inventory — distribute deduction across matching rows
-      let remaining = unitsNeeded;
-      for (const row of targetRows) {
-        if (remaining <= 0) break;
-        const deduct = Math.min(remaining, row.units_available);
-        const newUnits = row.units_available - deduct;
-        
-        await supabase
-          .from('blood_inventory')
-          .update({ 
-            units_available: newUnits,
-            status: newUnits > 5 ? 'available' : (newUnits > 0 ? 'critical' : 'out_of_stock'),
-            last_updated_at: new Date().toISOString()
-          })
-          .eq('id', row.id);
-        
-        remaining -= deduct;
-      }
-
-      // Step 4: Refresh data
-      await refreshHospitals();
       await fetchRequests();
-
       return { success: true };
     } catch (err) {
       console.error('Request submission failed:', err);
@@ -228,28 +186,70 @@ function App() {
     }
   };
 
-  // Admin: update request status
+  // 2. Admin Update Request (Handles Deduction on Fulfill)
   const updateRequestStatus = async (requestId, newStatus) => {
     if (!dbConnected) return;
     
     try {
-      const { error } = await supabase
+      if (newStatus === 'fulfilled') {
+        // Step A: Fetch request details
+        const { data: request, error: reqErr } = await supabase
+          .from('blood_requests')
+          .select('*')
+          .eq('id', requestId)
+          .single();
+        
+        if (reqErr) throw reqErr;
+
+        // Step B: Find inventory
+        const { data: inventory, error: invErr } = await supabase
+          .from('blood_inventory')
+          .select('*')
+          .eq('hospital_id', request.hospital_id)
+          .eq('blood_group', request.blood_group)
+          .eq('component_type', request.component_type)
+          .single();
+        
+        if (invErr) throw invErr;
+
+        // Step C: Validation
+        if (inventory.units_available < request.units_needed) {
+          alert(`Insufficient units available! Need ${request.units_needed}, but only ${inventory.units_available} in stock.`);
+          return;
+        }
+
+        // Step D: Reduce inventory
+        const newUnits = inventory.units_available - request.units_needed;
+        const { error: updateInvErr } = await supabase
+          .from('blood_inventory')
+          .update({ 
+            units_available: newUnits,
+            status: newUnits > 5 ? 'available' : (newUnits > 0 ? 'critical' : 'out_of_stock'),
+            last_updated_at: new Date().toISOString()
+          })
+          .eq('id', inventory.id);
+        
+        if (updateInvErr) throw updateInvErr;
+      }
+
+      // Step E: Update request status
+      const { error: updateReqErr } = await supabase
         .from('blood_requests')
         .update({ status: newStatus })
         .eq('id', requestId);
       
-      if (error) throw error;
+      if (updateReqErr) throw updateReqErr;
       
-      // Refresh requests list
+      // Step F: Refresh UI
+      await refreshHospitals();
       await fetchRequests();
     } catch (err) {
-      console.error('Status update failed:', err.message);
-      alert('Failed to update status: ' + err.message);
+      console.error('Operation failed:', err.message);
+      alert('Operation failed: ' + err.message);
     }
   };
 
   const updateStock = async (hospitalId, bloodGroup, componentTypes, newUnits) => {
-    // If connected, sync to Supabase
     if (dbConnected) {
       try {
         const updates = componentTypes.map(compType => ({
@@ -266,7 +266,6 @@ function App() {
           .upsert(updates, { onConflict: 'hospital_id,blood_group,component_type' });
 
         if (error) throw error;
-        
         await refreshHospitals();
       } catch (err) {
         console.error('Database update failed:', err.message);
@@ -306,42 +305,19 @@ function App() {
           <span className="db-status" style={{ fontSize: '0.75rem', color: dbConnected ? '#4caf50' : '#9e9e9e', marginRight: '0.5rem' }}>
             {dbConnected ? '● DB Connected' : '● Local Mode'}
           </span>
-          <a 
-            className={currentPage === 'search' || currentPage === 'results' ? 'active' : ''} 
-            onClick={() => navigateTo('search')}
-          >
-            Live Inventory
-          </a>
-          <a 
-            className={currentPage === 'admin' ? 'active' : ''} 
-            onClick={() => navigateTo('admin')}
-          >
-            Admin Panel
-          </a>
-          <a onClick={handleLogout} style={{ cursor: 'pointer' }}>
-            Logout
-          </a>
+          <a className={currentPage === 'search' || currentPage === 'results' ? 'active' : ''} onClick={() => navigateTo('search')}>Live Inventory</a>
+          <a className={currentPage === 'admin' ? 'active' : ''} onClick={() => navigateTo('admin')}>Admin Panel</a>
+          <a onClick={handleLogout} style={{ cursor: 'pointer' }}>Logout</a>
         </div>
       </nav>
 
       <main className="app-container">
         {currentPage === 'search' && <SearchPage onSearch={handleSearch} />}
         {currentPage === 'results' && (
-          <ResultsPage 
-            hospitals={hospitals} 
-            searchQuery={searchQuery} 
-            onBack={() => navigateTo('search')}
-            onSubmitRequest={submitBloodRequest}
-          />
+          <ResultsPage hospitals={hospitals} searchQuery={searchQuery} onBack={() => navigateTo('search')} onSubmitRequest={submitBloodRequest} />
         )}
         {currentPage === 'admin' && (
-          <AdminPage 
-            hospitals={hospitals} 
-            onUpdateStock={updateStock}
-            bloodRequests={bloodRequests}
-            onUpdateRequestStatus={updateRequestStatus}
-            onRefreshRequests={fetchRequests}
-          />
+          <AdminPage hospitals={hospitals} onUpdateStock={updateStock} bloodRequests={bloodRequests} onUpdateRequestStatus={updateRequestStatus} onRefreshRequests={fetchRequests} />
         )}
       </main>
     </>
