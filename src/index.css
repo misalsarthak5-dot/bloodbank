@@ -67,6 +67,23 @@ body {
   color: var(--primary-red);
 }
 
+@media (max-width: 640px) {
+  .navbar {
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 1rem;
+    text-align: center;
+  }
+  
+  .nav-links {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 1rem;
+  }
+}
+
 /* Page Layout */
 .page {
   padding: 2rem 0;

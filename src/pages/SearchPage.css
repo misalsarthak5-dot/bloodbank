@@ -149,8 +149,9 @@
   background: #ffffff;
   border: 2px solid #e2e8f0;
   border-radius: 50%;
-  width: 75px;
-  height: 75px;
+  width: 100%;
+  max-width: 75px;
+  aspect-ratio: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -233,17 +234,47 @@
 
 /* Responsive */
 @media (max-width: 640px) {
+  .hero-title {
+    font-size: 2rem;
+  }
+  .subtitle {
+    margin-bottom: 2rem;
+  }
   .elevated-card {
     padding: 2.5rem 1.5rem;
   }
   .blood-group-grid {
     grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
   }
   .blood-group-btn {
-    width: 65px;
-    height: 65px;
+    max-width: 65px;
+  }
+  .component-btn {
+    padding: 0.6rem 0.4rem;
+    font-size: 0.85rem;
   }
   .cursor-glow {
     display: none;
+  }
+}
+
+@media (max-width: 400px) {
+  .elevated-card {
+    padding: 2rem 1rem;
+  }
+  .blood-group-grid {
+    gap: 0.75rem;
+  }
+  .blood-group-btn {
+    max-width: 55px;
+    font-size: 1.1rem;
+  }
+  .component-grid {
+    gap: 0.5rem;
+  }
+  .component-btn {
+    padding: 0.5rem 0.25rem;
+    font-size: 0.8rem;
   }
 }
